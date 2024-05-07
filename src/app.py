@@ -9,11 +9,13 @@ from langchain_core.output_parsers import StrOutputParser
 
 load_dotenv()
 
+
 def init_database(
     user: str, password: str, host: str, port: str, database: str
 ) -> SQLDatabase:
     db_uri = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
     return SQLDatabase.from_uri(db_uri)
+
 
 def get_sql_chain(db):
     # create a template for the prompt
@@ -39,19 +41,48 @@ def get_sql_chain(db):
     SQL Query:
     """
     prompt = ChatPromptTemplate.from_template(template)
-    
+
     # Initialize LLM
     llm = ChatOpenAI()
-    
+
     def get_schema(_):
         return db.get_table_info()
 
-    return(
-        RunnablePassthrough.assign(schema=get_schema)
+    return (
+        RunnablePassthrough.assign(schema=get_schema) | prompt | llm | StrOutputParser()
+    )
+
+
+def get_response(user_query: str, db: SQLDatabase, chat_history: str):
+    sql_chain = get_sql_chain(db)
+
+    template = """
+        You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
+        Based on the table schema below, question, sql query, and sql response, write a natural language response:
+        <SCHEMA>{schema}</SCHEMA>
+
+        Conversation History: {chat_history}
+        SQL Query: <SQL>{query}</SQL>
+        User question: {question}
+        SQL Response: {response}"""
+
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI()
+    chain = (
+        RunnablePassthrough.assign(query=sql_chain).assign(
+        schema=lambda _: db.get_table_info(),
+        response=lambda vars: db.run(vars["query"]),
+        )
         | prompt
         | llm
         | StrOutputParser()
     )
+
+    return chain.invoke({
+        "question": user_query,
+        "chat_history": chat_history
+    })
+
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
@@ -103,12 +134,7 @@ if user_query is not None and user_query.strip() != "":
         st.markdown(user_query)
 
     with st.chat_message("AI"):
-        sql_chain = get_sql_chain(st.session_state.db)
-        response = sql_chain.invoke({
-            "chat_history": st.session_state.chat_history,
-            "question": user_query
-        }
-        )
+        response = get_response(user_query, st.session_state.db, st.session_state.chat_history)
         st.markdown(response)
 
     st.session_state.chat_history.append(AIMessage(content=response))
